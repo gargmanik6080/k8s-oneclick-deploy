@@ -1,3 +1,8 @@
+# Pin the resource names to "hello-world" instead of the default
+# "<release>-<chart>" (which would be "hello-world-hello-world"), so the
+# Service/Deployment names match the workflow lookups and README commands.
+fullnameOverride: hello-world
+
 replicaCount: 2
 
 image:
