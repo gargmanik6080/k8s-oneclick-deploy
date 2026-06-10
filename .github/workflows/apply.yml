@@ -173,6 +173,13 @@ jobs:
             sleep 10
           done
           PROM_SVC="kps-kube-prometheus-stack-prometheus"
+          echo "Waiting for Grafana LoadBalancer hostname..."
+          for i in $(seq 1 30); do
+            grafana_host=$(kubectl get svc kps-grafana -n "${MONITORING_NS}" \
+              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+            [ -n "${grafana_host}" ] && break
+            sleep 10
+          done
           {
             echo "## Deployment complete"
             echo ""
@@ -186,13 +193,14 @@ jobs:
               echo "- LoadBalancer still provisioning; check: \`kubectl get svc hello-world -n ${APP_NS}\`"
             fi
             echo ""
-            echo "### Monitoring (ClusterIP — port-forward, then open localhost)"
-            echo "- Grafana (admin / admin):"
-            echo "  \`\`\`"
-            echo "  kubectl port-forward -n ${MONITORING_NS} svc/kps-grafana 3000:80"
-            echo "  \`\`\`"
-            echo "  → http://localhost:3000 — \"Hello World Service\" dashboard + built-in Kubernetes dashboards"
-            echo "- Prometheus:"
+            echo "### Monitoring"
+            if [ -n "${grafana_host:-}" ]; then
+              echo "- Grafana (admin / admin): http://${grafana_host}/"
+            else
+              echo "- Grafana LoadBalancer still provisioning; check: \`kubectl get svc kps-grafana -n ${MONITORING_NS}\`"
+            fi
+            echo "  — \"Hello World Service\" dashboard + built-in Kubernetes dashboards"
+            echo "- Prometheus (ClusterIP, no public auth — port-forward):"
             echo "  \`\`\`"
             echo "  kubectl port-forward -n ${MONITORING_NS} svc/${PROM_SVC} 9090:9090"
             echo "  \`\`\`"
