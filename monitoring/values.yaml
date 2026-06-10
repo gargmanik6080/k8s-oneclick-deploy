@@ -45,12 +45,20 @@ prometheus:
 grafana:
   adminPassword: admin
   defaultDashboardsEnabled: true
+  # Expose Grafana on its own public ELB so it's reachable without port-forward.
+  # Grafana has the admin login; Prometheus is intentionally left ClusterIP since
+  # it has no auth (reach it via Grafana's datasource instead).
+  service:
+    type: LoadBalancer
+    port: 80
   resources:
     requests:
       cpu: 50m
-      memory: 128Mi
+      memory: 160Mi
+    # Grafana + dashboard loading can exceed a tight cap and OOMKill-loop on
+    # 1-vCPU nodes (seen as port-forward "lost connection to pod"); give headroom.
     limits:
-      memory: 192Mi
+      memory: 320Mi
   # Sidecar auto-imports any ConfigMap labeled grafana_dashboard=1 in ANY namespace,
   # which is how the hello-world dashboard ConfigMap gets loaded.
   sidecar:
