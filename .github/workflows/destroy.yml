@@ -1,0 +1,126 @@
+name: destroy
+
+# Teardown counterpart to apply.yml. Two modes:
+#   destroy     - tear down the live cluster with `terraform destroy`.
+#   purge-state - the sandbox already reaped the resources, so skip Terraform
+#                 and just drop the stale state artifact, letting the next
+#                 apply start from a clean slate.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "destroy = tear down live resources; purge-state = discard stale state only"
+        required: true
+        type: choice
+        default: destroy
+        options:
+          - destroy
+          - purge-state
+      cluster_name:
+        description: "EKS cluster name (destroy mode)"
+        required: false
+        default: "oneclick-eks"
+
+permissions:
+  contents: read
+  actions: write   # needed to delete the state artifact in purge-state mode
+
+concurrency:
+  group: tf-state
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  CLUSTER_NAME: ${{ github.event.inputs.cluster_name }}
+  TF_DIR: terraform
+  APP_NS: hello-world
+  MONITORING_NS: monitoring
+
+jobs:
+  destroy:
+    if: ${{ github.event.inputs.mode == 'destroy' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Restore Terraform state
+        uses: actions/download-artifact@v4
+        with:
+          name: tfstate
+          path: ${{ env.TF_DIR }}
+
+      # Remove the app's LoadBalancer first so AWS deletes the ELB and its
+      # security groups; otherwise the dangling ELB blocks VPC/subnet destroy.
+      - name: Uninstall Helm releases (best effort)
+        continue-on-error: true
+        run: |
+          aws eks update-kubeconfig --region "${AWS_REGION}" --name "${CLUSTER_NAME}" || exit 0
+          helm uninstall hello-world -n "${APP_NS}" --wait --timeout 5m || true
+          helm uninstall kps -n "${MONITORING_NS}" --wait --timeout 5m || true
+          echo "Waiting for cloud load balancers to be released..."
+          sleep 60
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false
+
+      - name: Terraform destroy
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform destroy -input=false -auto-approve \
+            -var="region=${AWS_REGION}" \
+            -var="cluster_name=${CLUSTER_NAME}"
+
+      # State now describes nothing; upload the emptied state so a later apply
+      # (or purge) sees the cleaned slate.
+      - name: Upload emptied Terraform state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfstate
+          path: ${{ env.TF_DIR }}/terraform.tfstate
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: true
+
+  purge-state:
+    if: ${{ github.event.inputs.mode == 'purge-state' }}
+    runs-on: ubuntu-latest
+    steps:
+      # No Terraform run: the resources are already gone. Just delete the
+      # state artifact so the next apply doesn't try to reconcile against it.
+      - name: Delete state artifact
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const arts = await github.paginate(
+              github.rest.actions.listArtifactsForRepo,
+              { owner, repo, per_page: 100 }
+            );
+            const stale = arts.filter(a => a.name === 'tfstate');
+            if (stale.length === 0) {
+              core.info('No tfstate artifact found; nothing to purge.');
+              return;
+            }
+            for (const a of stale) {
+              await github.rest.actions.deleteArtifact(
+                { owner, repo, artifact_id: a.id }
+              );
+              core.info(`Deleted tfstate artifact id=${a.id}`);
+            }
+            core.summary.addRaw(`Purged ${stale.length} tfstate artifact(s). Next apply starts clean.`).write();
