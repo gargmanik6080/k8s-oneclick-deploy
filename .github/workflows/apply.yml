@@ -172,11 +172,29 @@ jobs:
             [ -n "${host}" ] && break
             sleep 10
           done
-          echo "## Deployment complete" >> "$GITHUB_STEP_SUMMARY"
-          if [ -n "${host:-}" ]; then
-            echo "- App URL: http://${host}/" >> "$GITHUB_STEP_SUMMARY"
-            echo "- Metrics: http://${host}/metrics" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "- App LoadBalancer still provisioning; check: kubectl get svc hello-world -n ${APP_NS}" >> "$GITHUB_STEP_SUMMARY"
-          fi
-          echo "- Grafana (admin/admin): kubectl port-forward -n ${MONITORING_NS} svc/kps-grafana 3000:80" >> "$GITHUB_STEP_SUMMARY"
+          PROM_SVC="kps-kube-prometheus-stack-prometheus"
+          {
+            echo "## Deployment complete"
+            echo ""
+            echo "Cluster \`${CLUSTER_NAME}\` in \`${AWS_REGION}\` · image tag \`${{ steps.img.outputs.tag }}\`"
+            echo ""
+            echo "### Application"
+            if [ -n "${host:-}" ]; then
+              echo "- App URL: http://${host}/"
+              echo "- Metrics: http://${host}/metrics"
+            else
+              echo "- LoadBalancer still provisioning; check: \`kubectl get svc hello-world -n ${APP_NS}\`"
+            fi
+            echo ""
+            echo "### Monitoring (ClusterIP — port-forward, then open localhost)"
+            echo "- Grafana (admin / admin):"
+            echo "  \`\`\`"
+            echo "  kubectl port-forward -n ${MONITORING_NS} svc/kps-grafana 3000:80"
+            echo "  \`\`\`"
+            echo "  → http://localhost:3000 — \"Hello World Service\" dashboard + built-in Kubernetes dashboards"
+            echo "- Prometheus:"
+            echo "  \`\`\`"
+            echo "  kubectl port-forward -n ${MONITORING_NS} svc/${PROM_SVC} 9090:9090"
+            echo "  \`\`\`"
+            echo "  → http://localhost:9090 — Status → Targets shows the hello-world ServiceMonitor UP"
+          } >> "$GITHUB_STEP_SUMMARY"
