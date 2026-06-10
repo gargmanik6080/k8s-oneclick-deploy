@@ -24,6 +24,7 @@ kubeconfig
 
 # Claude Code session history (local only)
 .remember/
+.claude/
 
 # OS / editor
 .DS_Store
