@@ -1,0 +1,79 @@
+# Trimmed kube-prometheus-stack overrides for tiny m3.medium nodes (1 vCPU / 3.75 GiB).
+# Goal: fit Prometheus + Grafana + node-exporter + kube-state-metrics on a 3-node
+# cluster alongside the app, while still scraping our app's ServiceMonitor.
+
+# EKS hides the control plane, so these scrape jobs would only generate noise/targets-down.
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+# Alertmanager is unneeded for the demo and saves ~one pod + RAM.
+alertmanager:
+  enabled: false
+
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 192Mi
+
+prometheus:
+  prometheusSpec:
+    # Discover ServiceMonitors/PodMonitors regardless of Helm-release labels,
+    # so the hello-world ServiceMonitor (in its own namespace) is scraped.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    # Short retention keeps the local TSDB small.
+    retention: 3h
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        memory: 900Mi
+    # No PVC: ephemeral emptyDir is fine for a throwaway demo cluster.
+
+grafana:
+  adminPassword: admin
+  defaultDashboardsEnabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 192Mi
+  # Sidecar auto-imports any ConfigMap labeled grafana_dashboard=1 in ANY namespace,
+  # which is how the hello-world dashboard ConfigMap gets loaded.
+  sidecar:
+    dashboards:
+      enabled: true
+      searchNamespace: ALL
+    datasources:
+      enabled: true
+
+# Cluster-level metrics we keep.
+nodeExporter:
+  enabled: true
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
