@@ -1,0 +1,36 @@
+replicaCount: 2
+
+image:
+  # repository/tag are overridden by the CI workflow (--set image.repository=..., image.tag=hello-world-<sha>).
+  repository: docker.io/gargmanik6080/images
+  tag: hello-world-latest
+  pullPolicy: IfNotPresent
+
+# Pull secret created by the workflow from DOCKERHUB_USERNAME/DOCKERHUB_TOKEN.
+imagePullSecrets:
+  - name: dockerhub-pull
+
+service:
+  type: LoadBalancer
+  port: 80
+
+containerPort: 8080
+
+# Small footprint so pods fit on m3.medium (1 vCPU / 3.75 GiB) nodes.
+resources:
+  requests:
+    cpu: 25m
+    memory: 32Mi
+  limits:
+    cpu: 100m
+    memory: 64Mi
+
+serviceMonitor:
+  enabled: true
+  interval: 15s
+  path: /metrics
+  # Extra labels for Prometheus selection (kube-prometheus-stack is configured to scrape all SMs anyway).
+  additionalLabels: {}
+
+grafanaDashboard:
+  enabled: true
