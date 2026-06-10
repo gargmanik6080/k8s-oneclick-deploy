@@ -11,7 +11,7 @@ override.tf.json
 *_override.tf.json
 .terraformrc
 terraform.rc
-.terraform.lock.hcl
+# NOTE: .terraform.lock.hcl is intentionally committed for reproducible provider versions.
 
 # Go
 /app/bin/
