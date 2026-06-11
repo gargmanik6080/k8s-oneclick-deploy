@@ -7,6 +7,17 @@ deployed via **Helm**, and monitored with **Prometheus + Grafana**, all driven f
 Trigger one workflow → get a live, curlable HTTP endpoint on EKS plus a Grafana instance showing
 both app metrics and cluster health.
 
+## Contents
+
+- [What it does](#what-it-does)
+- [Architecture](#architecture)
+- [Repository layout](#repository-layout)
+- [Prerequisites](#prerequisites)
+- [Required GitHub repo secrets](#required-github-repo-secrets)
+- [Run it](#run-it)
+- [Design notes](#design-notes)
+- [Known limitations](#known-limitations)
+
 ## What it does
 
 Running the `apply` workflow performs, end to end:
