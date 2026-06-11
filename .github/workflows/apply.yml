@@ -6,6 +6,17 @@ name: apply
 on:
   workflow_dispatch:
     inputs:
+      # Region is a plain input (not a secret) so it isn't masked as *** in the
+      # run summary / ELB URLs. The sandbox only allows these three regions.
+      region:
+        description: "AWS region"
+        required: true
+        type: choice
+        default: us-east-1
+        options:
+          - us-east-1
+          - us-east-2
+          - us-west-2
       cluster_name:
         description: "EKS cluster name"
         required: false
@@ -20,7 +31,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  AWS_REGION: ${{ secrets.AWS_REGION }}
+  AWS_REGION: ${{ github.event.inputs.region }}
   CLUSTER_NAME: ${{ github.event.inputs.cluster_name }}
   IMAGE_REPO: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/images
   TF_DIR: terraform
@@ -42,7 +53,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           # Optional: only set when the sandbox issues temporary creds.
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
 
       # --- preflight: fail fast on bad creds / wrong region / missing perms --
       - name: IAM & region preflight
