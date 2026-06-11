@@ -20,7 +20,7 @@ both app metrics and cluster health.
 
 ## What it does
 
-Running the `apply` workflow performs, end to end:
+Running the **Deploy** workflow performs, end to end:
 
 1. **Preflight** — validates AWS credentials, region, and that `m3.medium` is offered there (fails fast).
 2. **Build & push** the app image to Docker Hub.
@@ -104,7 +104,7 @@ Set these under **Settings → Secrets and variables → Actions**. In the O'Rei
 **Deploy**
 
 1. Set the secrets above.
-2. Actions → **apply** → *Run workflow*.
+2. Actions → **Deploy** → *Run workflow*.
 3. When it finishes, the run **Summary** shows:
    - `App URL: http://<app-elb-hostname>/`
    - `Grafana (admin / admin): http://<grafana-elb-hostname>/`

@@ -1,4 +1,4 @@
-name: apply
+name: Deploy
 
 # One-click: preflight -> build & push image -> provision EKS -> deploy monitoring + app.
 # Triggered manually so a fresh set of (rotating) sandbox credentials can be supplied
