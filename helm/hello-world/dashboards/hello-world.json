@@ -14,7 +14,11 @@
         "query": "prometheus",
         "hide": 0,
         "refresh": 1,
-        "current": {}
+        "current": {},
+        "options": [],
+        "regex": "",
+        "includeAll": false,
+        "multi": false
       }
     ]
   },
