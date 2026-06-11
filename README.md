@@ -34,15 +34,15 @@ Running the **Deploy** workflow performs, end to end:
 ```
 GitHub Actions (workflow_dispatch)
 │
-├── apply.yml ──────────────────────────────────────────────┐
-│     AWS creds (repo secrets, session token optional)       │
-│       ├─ preflight: sts get-caller-identity, AZ/EKS probe  │
+├── apply.yml  (Deploy)
+│     AWS creds (repo secrets, session token optional)
+│       ├─ preflight: sts get-caller-identity, AZ/EKS probe
 │       ├─ docker build → Docker Hub (images:hello-world-<sha>)
 │       ├─ terraform apply → VPC + EKS (m3.medium ×3, AZ-filtered)
-│       ├─ aws eks update-kubeconfig                          │
-│       ├─ helm: kube-prometheus-stack  (monitoring/values.yaml)
-│       ├─ helm: hello-world chart  (--set image.tag=<sha>)   │
-│       └─ state in S3: oneclick-tfstate-<account>-<region> ──┘
+│       ├─ aws eks update-kubeconfig
+│       ├─ helm: kube-prometheus-stack (monitoring/values.yaml)
+│       ├─ helm: hello-world chart (--set image.tag=<sha>)
+│       └─ state in S3: oneclick-tfstate-<account>-<region>
 │
 ├── plan.yml ─── init S3 backend → fmt/validate → terraform plan (read-only preview)
 │
@@ -50,19 +50,22 @@ GitHub Actions (workflow_dispatch)
       ├─ destroy:     init S3 backend → helm uninstall (release ELB) → terraform destroy
       └─ purge-state: clear the S3 state object (sandbox already reaped resources)
 
-         ┌─────────────────────── EKS cluster ───────────────────────┐
-         │  ns: hello-world           ns: monitoring                  │
-         │  ┌───────────────┐         ┌──────────────┐                │
-         │  │ Deployment    │ /metrics│ Prometheus   │── scrapes ──┐  │
-         │  │ (2 pods)      │◀────────│ (ServiceMon.) │             │  │
-         │  └──────┬────────┘         └──────┬───────┘             │  │
-         │         │ LoadBalancer            │                     │  │
-         │    ┌────▼─────┐              ┌─────▼──────┐   dashboard  │  │
-         │    │  ELB     │              │  Grafana   │◀─ ConfigMap ─┘  │
-         │    └────┬─────┘              └────────────┘ (sidecar)      │
-         └─────────┼──────────────────────────────────────────────────┘
-                   │
-              curl http://<elb>/  → "Hello World"
+         ┌──────────────────────────────── EKS cluster ─────────────────────────────────┐
+         │  ns: hello-world             ns: monitoring                                  │
+         │  ┌────────────────┐          ┌────────────────┐          ┌────────────────┐  │
+         │  │ Deployment     │ /metrics │ Prometheus     │  query   │ Grafana        │  │
+         │  │ (2 pods)       │◀─────────│ (ServiceMon.)  │◀─────────│ (dashboards)   │  │
+         │  └───────┬────────┘          └────────────────┘          └───────┬────────┘  │
+         │          │ LoadBalancer       ClusterIP             LoadBalancer │           │
+         │          ▼                    (port-forward)                     ▼           │
+         │    ┌───────────┐                                           ┌───────────┐     │
+         │    │ ELB (app) │                                           │ ELB (graf)│     │
+         │    └─────┬─────┘                                           └─────┬─────┘     │
+         │          │                                                       │           │
+         └──────────┼───────────────────────────────────────────────────────┼───────────┘
+                    │                                                       │
+         app:     curl http://<app-elb>/      → "Hello World"
+         grafana: open http://<grafana-elb>/  (admin / admin)
 ```
 
 ## Repository layout
