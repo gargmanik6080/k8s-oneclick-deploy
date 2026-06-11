@@ -108,17 +108,40 @@ jobs:
         with:
           terraform_wrapper: false
 
-      # Reuse state from a previous run if present, so re-applies are incremental.
-      - name: Restore Terraform state
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          name: tfstate
-          path: ${{ env.TF_DIR }}
+      # State lives in S3 (same account) so apply and destroy share one source of
+      # truth and re-applies are incremental. The bucket can't be managed by this
+      # state (chicken-and-egg), so create it out-of-band, idempotently. If it
+      # doesn't exist yet, init starts from empty state — i.e. a clean build.
+      - name: Ensure Terraform state bucket
+        id: tfbackend
+        run: |
+          set -euo pipefail
+          account_id=$(aws sts get-caller-identity --query Account --output text)
+          bucket="oneclick-tfstate-${account_id}-${AWS_REGION}"
+          if ! aws s3api head-bucket --bucket "${bucket}" 2>/dev/null; then
+            echo "Creating state bucket ${bucket}..."
+            if [ "${AWS_REGION}" = "us-east-1" ]; then
+              aws s3api create-bucket --bucket "${bucket}" --region "${AWS_REGION}"
+            else
+              aws s3api create-bucket --bucket "${bucket}" --region "${AWS_REGION}" \
+                --create-bucket-configuration LocationConstraint="${AWS_REGION}"
+            fi
+            aws s3api put-bucket-versioning --bucket "${bucket}" \
+              --versioning-configuration Status=Enabled
+            aws s3api put-public-access-block --bucket "${bucket}" \
+              --public-access-block-configuration \
+              BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+          fi
+          echo "bucket=${bucket}" >> "$GITHUB_OUTPUT"
+          echo "key=${CLUSTER_NAME}/terraform.tfstate" >> "$GITHUB_OUTPUT"
 
       - name: Terraform init
         working-directory: ${{ env.TF_DIR }}
-        run: terraform init -input=false
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ steps.tfbackend.outputs.bucket }}" \
+            -backend-config="key=${{ steps.tfbackend.outputs.key }}" \
+            -backend-config="region=${AWS_REGION}"
 
       - name: Terraform apply
         working-directory: ${{ env.TF_DIR }}
@@ -126,18 +149,6 @@ jobs:
           terraform apply -input=false -auto-approve \
             -var="region=${AWS_REGION}" \
             -var="cluster_name=${CLUSTER_NAME}"
-
-      # Always persist state, even if a later step fails, so destroy can clean up.
-      - name: Upload Terraform state
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: tfstate
-          path: |
-            ${{ env.TF_DIR }}/terraform.tfstate
-          if-no-files-found: warn
-          retention-days: 7
-          overwrite: true
 
       # --- connect kubectl/helm ---------------------------------------------
       - name: Update kubeconfig

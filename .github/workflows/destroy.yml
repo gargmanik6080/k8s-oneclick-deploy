@@ -3,7 +3,7 @@ name: destroy
 # Teardown counterpart to apply.yml. Two modes:
 #   destroy     - tear down the live cluster with `terraform destroy`.
 #   purge-state - the sandbox already reaped the resources, so skip Terraform
-#                 and just drop the stale state artifact, letting the next
+#                 and just clear the stale S3 state object, letting the next
 #                 apply start from a clean slate.
 on:
   workflow_dispatch:
@@ -16,9 +16,10 @@ on:
         options:
           - destroy
           - purge-state
-      # Plain input (not a secret), matching apply.yml. Ignored in purge-state mode.
+      # Plain input (not a secret), matching apply.yml. Used by both modes to
+      # locate the S3 state bucket (oneclick-tfstate-<account>-<region>).
       region:
-        description: "AWS region (destroy mode)"
+        description: "AWS region"
         required: true
         type: choice
         default: us-east-1
@@ -27,13 +28,12 @@ on:
           - us-east-2
           - us-west-2
       cluster_name:
-        description: "EKS cluster name (destroy mode)"
+        description: "EKS cluster name"
         required: false
         default: "oneclick-eks"
 
 permissions:
   contents: read
-  actions: write   # needed to delete the state artifact in purge-state mode
 
 concurrency:
   group: tf-state
@@ -67,58 +67,52 @@ jobs:
         with:
           terraform_wrapper: false
 
-      # download-artifact@v4 is scoped to the *current* run, so the apply run's
-      # tfstate isn't visible by name alone. Find the most recent successful
-      # apply run and download its artifact explicitly via run-id + token.
-      - name: Find latest successful apply run
-        id: apply_run
-        env:
-          GH_TOKEN: ${{ github.token }}
+      # Resolve the same S3 backend apply uses. If the bucket is missing we
+      # create it (empty), which simply means there's nothing to destroy.
+      - name: Ensure Terraform state bucket
+        id: tfbackend
         run: |
           set -euo pipefail
-          run_id=$(gh run list \
-            --workflow apply.yml \
-            --status success \
-            --limit 1 \
-            --json databaseId \
-            --jq '.[0].databaseId // empty')
-          if [ -z "${run_id}" ]; then
-            echo "No successful apply run found — nothing to restore."
-            echo "found=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "Latest successful apply run: ${run_id}"
-            echo "found=true" >> "$GITHUB_OUTPUT"
-            echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
+          account_id=$(aws sts get-caller-identity --query Account --output text)
+          bucket="oneclick-tfstate-${account_id}-${AWS_REGION}"
+          if ! aws s3api head-bucket --bucket "${bucket}" 2>/dev/null; then
+            echo "Creating state bucket ${bucket}..."
+            if [ "${AWS_REGION}" = "us-east-1" ]; then
+              aws s3api create-bucket --bucket "${bucket}" --region "${AWS_REGION}"
+            else
+              aws s3api create-bucket --bucket "${bucket}" --region "${AWS_REGION}" \
+                --create-bucket-configuration LocationConstraint="${AWS_REGION}"
+            fi
+            aws s3api put-bucket-versioning --bucket "${bucket}" \
+              --versioning-configuration Status=Enabled
+            aws s3api put-public-access-block --bucket "${bucket}" \
+              --public-access-block-configuration \
+              BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
           fi
+          echo "bucket=${bucket}" >> "$GITHUB_OUTPUT"
+          echo "key=${CLUSTER_NAME}/terraform.tfstate" >> "$GITHUB_OUTPUT"
 
-      - name: Restore Terraform state
-        if: steps.apply_run.outputs.found == 'true'
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: tfstate
-          path: ${{ env.TF_DIR }}
-          run-id: ${{ steps.apply_run.outputs.run_id }}
-          github-token: ${{ github.token }}
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ steps.tfbackend.outputs.bucket }}" \
+            -backend-config="key=${{ steps.tfbackend.outputs.key }}" \
+            -backend-config="region=${AWS_REGION}"
 
-      # Treat a missing or resource-less state as "nothing to destroy" and let
-      # the rest of the job no-op cleanly instead of failing.
+      # Empty state (fresh/cleared bucket) means there's nothing to tear down;
+      # let the rest of the job no-op cleanly instead of failing.
       - name: Check for destroyable state
         id: guard
+        working-directory: ${{ env.TF_DIR }}
         run: |
           set -euo pipefail
-          f="${TF_DIR}/terraform.tfstate"
-          if [ ! -f "${f}" ]; then
-            echo "No state file restored — nothing to destroy."
-            echo "has_state=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          count=$(jq '(.resources // []) | length' "${f}" 2>/dev/null || echo 0)
+          count=$(terraform state list 2>/dev/null | wc -l | tr -d ' ')
           if [ "${count:-0}" -gt 0 ]; then
             echo "State has ${count} resource(s); proceeding with destroy."
             echo "has_state=true" >> "$GITHUB_OUTPUT"
           else
-            echo "State has no resources — nothing to destroy."
+            echo "No resources in state — nothing to destroy."
             echo "has_state=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -126,7 +120,7 @@ jobs:
         if: steps.guard.outputs.has_state != 'true'
         run: |
           echo "No live Terraform state found; cluster is already gone or was never created." >> "$GITHUB_STEP_SUMMARY"
-          echo "If the sandbox reaped resources, run this workflow with mode=purge-state to drop the stale artifact." >> "$GITHUB_STEP_SUMMARY"
+          echo "If the sandbox reaped resources, run this workflow with mode=purge-state to clear the stale S3 state." >> "$GITHUB_STEP_SUMMARY"
 
       # Remove the app's LoadBalancer first so AWS deletes the ELB and its
       # security groups; otherwise the dangling ELB blocks VPC/subnet destroy.
@@ -140,11 +134,7 @@ jobs:
           echo "Waiting for cloud load balancers to be released..."
           sleep 60
 
-      - name: Terraform init
-        if: steps.guard.outputs.has_state == 'true'
-        working-directory: ${{ env.TF_DIR }}
-        run: terraform init -input=false
-
+      # terraform destroy writes the emptied state back to S3 automatically.
       - name: Terraform destroy
         if: steps.guard.outputs.has_state == 'true'
         working-directory: ${{ env.TF_DIR }}
@@ -153,42 +143,32 @@ jobs:
             -var="region=${AWS_REGION}" \
             -var="cluster_name=${CLUSTER_NAME}"
 
-      # State now describes nothing; upload the emptied state so a later apply
-      # (or purge) sees the cleaned slate.
-      - name: Upload emptied Terraform state
-        if: always() && steps.guard.outputs.has_state == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: tfstate
-          path: ${{ env.TF_DIR }}/terraform.tfstate
-          if-no-files-found: warn
-          retention-days: 7
-          overwrite: true
-
   purge-state:
     if: ${{ github.event.inputs.mode == 'purge-state' }}
     runs-on: ubuntu-latest
     steps:
-      # No Terraform run: the resources are already gone. Just delete the
-      # state artifact so the next apply doesn't try to reconcile against it.
-      - name: Delete state artifact
-        uses: actions/github-script@v7
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          script: |
-            const { owner, repo } = context.repo;
-            const arts = await github.paginate(
-              github.rest.actions.listArtifactsForRepo,
-              { owner, repo, per_page: 100 }
-            );
-            const stale = arts.filter(a => a.name === 'tfstate');
-            if (stale.length === 0) {
-              core.info('No tfstate artifact found; nothing to purge.');
-              return;
-            }
-            for (const a of stale) {
-              await github.rest.actions.deleteArtifact(
-                { owner, repo, artifact_id: a.id }
-              );
-              core.info(`Deleted tfstate artifact id=${a.id}`);
-            }
-            core.summary.addRaw(`Purged ${stale.length} tfstate artifact(s). Next apply starts clean.`).write();
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # No Terraform run: the resources are already gone. Just clear the S3
+      # state object (and any stale lockfile) so the next apply starts clean.
+      # The bucket is versioned, so this leaves a delete marker — recoverable
+      # if needed — rather than hard-deleting history.
+      - name: Purge S3 state
+        run: |
+          set -euo pipefail
+          account_id=$(aws sts get-caller-identity --query Account --output text)
+          bucket="oneclick-tfstate-${account_id}-${AWS_REGION}"
+          key="${CLUSTER_NAME}/terraform.tfstate"
+          if ! aws s3api head-bucket --bucket "${bucket}" 2>/dev/null; then
+            echo "No state bucket ${bucket}; nothing to purge." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          aws s3 rm "s3://${bucket}/${key}" || true
+          aws s3 rm "s3://${bucket}/${key}.tflock" || true
+          echo "Purged state at \`s3://${bucket}/${key}\`. Next apply starts clean." >> "$GITHUB_STEP_SUMMARY"
