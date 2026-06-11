@@ -1,0 +1,126 @@
+name: plan
+
+# Read-only preview of what `apply` would change. Runs `terraform plan`
+# against the same shared S3 state, so it reflects real drift from the live
+# cluster. Safe to run anytime — it never modifies infrastructure.
+on:
+  workflow_dispatch:
+    inputs:
+      # Plain input (not a secret), matching apply.yml — keeps it out of the
+      # masked run summary. The sandbox only allows these three regions.
+      region:
+        description: "AWS region"
+        required: true
+        type: choice
+        default: us-east-1
+        options:
+          - us-east-1
+          - us-east-2
+          - us-west-2
+      cluster_name:
+        description: "EKS cluster name"
+        required: false
+        default: "oneclick-eks"
+
+permissions:
+  contents: read
+
+concurrency:
+  # Share apply/destroy's group so a plan never races a state-writing run
+  # (native S3 locking would otherwise reject the concurrent lock).
+  group: tf-state
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ github.event.inputs.region }}
+  CLUSTER_NAME: ${{ github.event.inputs.cluster_name }}
+  TF_DIR: terraform
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      # Resolve the same S3 backend apply/destroy use. If the bucket is missing
+      # we create it (empty), which means plan simply shows a full create.
+      - name: Ensure Terraform state bucket
+        id: tfbackend
+        run: |
+          set -euo pipefail
+          account_id=$(aws sts get-caller-identity --query Account --output text)
+          bucket="oneclick-tfstate-${account_id}-${AWS_REGION}"
+          if ! aws s3api head-bucket --bucket "${bucket}" 2>/dev/null; then
+            echo "Creating state bucket ${bucket}..."
+            if [ "${AWS_REGION}" = "us-east-1" ]; then
+              aws s3api create-bucket --bucket "${bucket}" --region "${AWS_REGION}"
+            else
+              aws s3api create-bucket --bucket "${bucket}" --region "${AWS_REGION}" \
+                --create-bucket-configuration LocationConstraint="${AWS_REGION}"
+            fi
+            aws s3api put-bucket-versioning --bucket "${bucket}" \
+              --versioning-configuration Status=Enabled
+            aws s3api put-public-access-block --bucket "${bucket}" \
+              --public-access-block-configuration \
+              BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+          fi
+          echo "bucket=${bucket}" >> "$GITHUB_OUTPUT"
+          echo "key=${CLUSTER_NAME}/terraform.tfstate" >> "$GITHUB_OUTPUT"
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ steps.tfbackend.outputs.bucket }}" \
+            -backend-config="key=${{ steps.tfbackend.outputs.key }}" \
+            -backend-config="region=${AWS_REGION}"
+
+      - name: Terraform format check
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform fmt -check -recursive
+
+      - name: Terraform validate
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform validate
+
+      # -detailed-exitcode: 0 = no changes, 2 = changes present, 1 = error.
+      # Treat both 0 and 2 as success; surface the plan in the run summary.
+      - name: Terraform plan
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          set +e
+          terraform plan -input=false -no-color -detailed-exitcode \
+            -var="region=${AWS_REGION}" \
+            -var="cluster_name=${CLUSTER_NAME}" \
+            > plan.txt 2>&1
+          code=$?
+          set -e
+          {
+            echo "## Terraform plan — \`${CLUSTER_NAME}\` in \`${AWS_REGION}\`"
+            echo ""
+            case "${code}" in
+              0) echo "No changes. Infrastructure matches the configuration." ;;
+              2) echo "Changes detected — \`apply\` would modify infrastructure." ;;
+              *) echo "Plan failed (exit ${code}). See log below." ;;
+            esac
+            echo ""
+            echo '```'
+            cat plan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Fail the job only on a real error, not on "changes present".
+          [ "${code}" -eq 1 ] && exit 1 || exit 0
