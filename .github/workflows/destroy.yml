@@ -67,15 +67,71 @@ jobs:
         with:
           terraform_wrapper: false
 
+      # download-artifact@v4 is scoped to the *current* run, so the apply run's
+      # tfstate isn't visible by name alone. Find the most recent successful
+      # apply run and download its artifact explicitly via run-id + token.
+      - name: Find latest successful apply run
+        id: apply_run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id=$(gh run list \
+            --workflow apply.yml \
+            --status success \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId // empty')
+          if [ -z "${run_id}" ]; then
+            echo "No successful apply run found — nothing to restore."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Latest successful apply run: ${run_id}"
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Restore Terraform state
+        if: steps.apply_run.outputs.found == 'true'
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: tfstate
           path: ${{ env.TF_DIR }}
+          run-id: ${{ steps.apply_run.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      # Treat a missing or resource-less state as "nothing to destroy" and let
+      # the rest of the job no-op cleanly instead of failing.
+      - name: Check for destroyable state
+        id: guard
+        run: |
+          set -euo pipefail
+          f="${TF_DIR}/terraform.tfstate"
+          if [ ! -f "${f}" ]; then
+            echo "No state file restored — nothing to destroy."
+            echo "has_state=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          count=$(jq '(.resources // []) | length' "${f}" 2>/dev/null || echo 0)
+          if [ "${count:-0}" -gt 0 ]; then
+            echo "State has ${count} resource(s); proceeding with destroy."
+            echo "has_state=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "State has no resources — nothing to destroy."
+            echo "has_state=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Nothing to destroy
+        if: steps.guard.outputs.has_state != 'true'
+        run: |
+          echo "No live Terraform state found; cluster is already gone or was never created." >> "$GITHUB_STEP_SUMMARY"
+          echo "If the sandbox reaped resources, run this workflow with mode=purge-state to drop the stale artifact." >> "$GITHUB_STEP_SUMMARY"
 
       # Remove the app's LoadBalancer first so AWS deletes the ELB and its
       # security groups; otherwise the dangling ELB blocks VPC/subnet destroy.
       - name: Uninstall Helm releases (best effort)
+        if: steps.guard.outputs.has_state == 'true'
         continue-on-error: true
         run: |
           aws eks update-kubeconfig --region "${AWS_REGION}" --name "${CLUSTER_NAME}" || exit 0
@@ -85,10 +141,12 @@ jobs:
           sleep 60
 
       - name: Terraform init
+        if: steps.guard.outputs.has_state == 'true'
         working-directory: ${{ env.TF_DIR }}
         run: terraform init -input=false
 
       - name: Terraform destroy
+        if: steps.guard.outputs.has_state == 'true'
         working-directory: ${{ env.TF_DIR }}
         run: |
           terraform destroy -input=false -auto-approve \
@@ -98,7 +156,7 @@ jobs:
       # State now describes nothing; upload the emptied state so a later apply
       # (or purge) sees the cleaned slate.
       - name: Upload emptied Terraform state
-        if: always()
+        if: always() && steps.guard.outputs.has_state == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: tfstate
