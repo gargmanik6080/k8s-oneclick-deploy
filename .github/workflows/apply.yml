@@ -78,6 +78,9 @@ jobs:
 
       - name: Build & push image
         uses: docker/build-push-action@v6
+        env:
+          # Suppress the auto-generated "Docker Build" job summary.
+          DOCKER_BUILD_SUMMARY: "false"
         with:
           context: app
           push: true
