@@ -89,10 +89,13 @@ Set these under **Settings → Secrets and variables → Actions**. In the O'Rei
 |---|---|---|
 | `AWS_ACCESS_KEY_ID` | yes | From the sandbox session. |
 | `AWS_SECRET_ACCESS_KEY` | yes | From the sandbox session. |
-| `AWS_REGION` | yes | `us-east-1`, `us-east-2`, or `us-west-2`. |
 | `AWS_SESSION_TOKEN` | only if temporary creds | Leave unset for a long-lived IAM user key. |
 | `DOCKERHUB_USERNAME` | yes | Docker Hub login; image goes to `docker.io/<user>/images`. |
 | `DOCKERHUB_TOKEN` | yes | Docker Hub access token (used for push **and** the in-cluster pull secret). |
+
+> **Region is a workflow input, not a secret.** It's chosen at *Run workflow* time (`us-east-1`,
+> `us-east-2`, or `us-west-2`; default `us-east-1`). Keeping it out of secrets means it isn't masked as
+> `***` in the run summary and the ELB URLs stay clickable.
 
 ## Run it
 

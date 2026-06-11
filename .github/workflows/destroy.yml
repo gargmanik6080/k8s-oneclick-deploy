@@ -16,6 +16,16 @@ on:
         options:
           - destroy
           - purge-state
+      # Plain input (not a secret), matching apply.yml. Ignored in purge-state mode.
+      region:
+        description: "AWS region (destroy mode)"
+        required: true
+        type: choice
+        default: us-east-1
+        options:
+          - us-east-1
+          - us-east-2
+          - us-west-2
       cluster_name:
         description: "EKS cluster name (destroy mode)"
         required: false
@@ -30,7 +40,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  AWS_REGION: ${{ secrets.AWS_REGION }}
+  AWS_REGION: ${{ github.event.inputs.region }}
   CLUSTER_NAME: ${{ github.event.inputs.cluster_name }}
   TF_DIR: terraform
   APP_NS: hello-world
@@ -50,7 +60,7 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
