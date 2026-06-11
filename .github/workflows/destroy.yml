@@ -122,26 +122,97 @@ jobs:
           echo "No live Terraform state found; cluster is already gone or was never created." >> "$GITHUB_STEP_SUMMARY"
           echo "If the sandbox reaped resources, run this workflow with mode=purge-state to clear the stale S3 state." >> "$GITHUB_STEP_SUMMARY"
 
-      # Remove the app's LoadBalancer first so AWS deletes the ELB and its
-      # security groups; otherwise the dangling ELB blocks VPC/subnet destroy.
+      # Resolve the VPC by its tags (set in terraform/main.tf) so later steps can
+      # force-clean leftover ELBs/ENIs that would otherwise pin the subnets. Tag
+      # lookup works even when state is partial from an earlier failed destroy.
+      - name: Resolve VPC
+        id: vpc
+        if: steps.guard.outputs.has_state == 'true'
+        run: |
+          set -uo pipefail
+          vpc=$(aws ec2 describe-vpcs --region "${AWS_REGION}" \
+            --filters "Name=tag:Name,Values=${CLUSTER_NAME}-vpc" \
+                      "Name=tag:Project,Values=k8s-oneclick-deploy" \
+            --query 'Vpcs[0].VpcId' --output text 2>/dev/null || true)
+          [ "${vpc}" = "None" ] && vpc=""
+          echo "vpc_id=${vpc}" >> "$GITHUB_OUTPUT"
+          echo "Resolved VPC: ${vpc:-<none>}"
+
+      # Remove the app/Grafana LoadBalancers first so AWS releases their ELBs and
+      # the ENIs they leave in the subnets; a dangling ELB blocks VPC/subnet
+      # destroy. Poll until the load balancers in the VPC actually drain rather
+      # than sleeping a fixed interval (ELB teardown can outlast a flat wait).
       - name: Uninstall Helm releases (best effort)
         if: steps.guard.outputs.has_state == 'true'
         continue-on-error: true
+        env:
+          VPC_ID: ${{ steps.vpc.outputs.vpc_id }}
         run: |
           aws eks update-kubeconfig --region "${AWS_REGION}" --name "${CLUSTER_NAME}" || exit 0
           helm uninstall hello-world -n "${APP_NS}" --wait --timeout 5m || true
           helm uninstall kps -n "${MONITORING_NS}" --wait --timeout 5m || true
-          echo "Waiting for cloud load balancers to be released..."
-          sleep 60
+          if [ -n "${VPC_ID:-}" ]; then
+            echo "Waiting for load balancers in ${VPC_ID} to drain..."
+            for i in $(seq 1 20); do
+              classic=$(aws elb describe-load-balancers --region "${AWS_REGION}" \
+                --query "length(LoadBalancerDescriptions[?VPCId=='${VPC_ID}'])" --output text 2>/dev/null || echo 0)
+              v2=$(aws elbv2 describe-load-balancers --region "${AWS_REGION}" \
+                --query "length(LoadBalancers[?VpcId=='${VPC_ID}'])" --output text 2>/dev/null || echo 0)
+              echo "  attempt ${i}: classic=${classic} v2=${v2}"
+              [ "${classic:-0}" = "0" ] && [ "${v2:-0}" = "0" ] && break
+              sleep 15
+            done
+          else
+            echo "No VPC resolved; falling back to a fixed wait."
+            sleep 60
+          fi
 
       # terraform destroy writes the emptied state back to S3 automatically.
-      - name: Terraform destroy
+      # If it fails (typically a DependencyViolation: an orphaned ELB/ENI still
+      # pinning a subnet), force-delete the leftover load balancers and freed
+      # ENIs in the VPC, then retry destroy once.
+      - name: Terraform destroy (force cleanup on failure)
         if: steps.guard.outputs.has_state == 'true'
         working-directory: ${{ env.TF_DIR }}
+        env:
+          VPC_ID: ${{ steps.vpc.outputs.vpc_id }}
         run: |
-          terraform destroy -input=false -auto-approve \
-            -var="region=${AWS_REGION}" \
-            -var="cluster_name=${CLUSTER_NAME}"
+          set -uo pipefail
+          destroy() {
+            terraform destroy -input=false -auto-approve \
+              -var="region=${AWS_REGION}" \
+              -var="cluster_name=${CLUSTER_NAME}"
+          }
+          force_cleanup() {
+            if [ -z "${VPC_ID:-}" ]; then
+              echo "::warning::No VPC id resolved; cannot force-clean leftover ELBs/ENIs."
+              return 0
+            fi
+            echo "::warning::Force-cleaning leftover load balancers and ENIs in ${VPC_ID}"
+            for nm in $(aws elb describe-load-balancers --region "${AWS_REGION}" \
+                --query "LoadBalancerDescriptions[?VPCId=='${VPC_ID}'].LoadBalancerName" --output text 2>/dev/null); do
+              echo "deleting classic ELB ${nm}"
+              aws elb delete-load-balancer --region "${AWS_REGION}" --load-balancer-name "${nm}" || true
+            done
+            for arn in $(aws elbv2 describe-load-balancers --region "${AWS_REGION}" \
+                --query "LoadBalancers[?VpcId=='${VPC_ID}'].LoadBalancerArn" --output text 2>/dev/null); do
+              echo "deleting v2 LB ${arn}"
+              aws elbv2 delete-load-balancer --region "${AWS_REGION}" --load-balancer-arn "${arn}" || true
+            done
+            echo "waiting for ENIs to detach..."
+            sleep 45
+            for eni in $(aws ec2 describe-network-interfaces --region "${AWS_REGION}" \
+                --filters Name=vpc-id,Values="${VPC_ID}" Name=status,Values=available \
+                --query 'NetworkInterfaces[].NetworkInterfaceId' --output text 2>/dev/null); do
+              echo "deleting ENI ${eni}"
+              aws ec2 delete-network-interface --region "${AWS_REGION}" --network-interface-id "${eni}" || true
+            done
+          }
+          if ! destroy; then
+            echo "First destroy failed; force-cleaning leftovers and retrying once."
+            force_cleanup
+            destroy
+          fi
 
   purge-state:
     if: ${{ github.event.inputs.mode == 'purge-state' }}

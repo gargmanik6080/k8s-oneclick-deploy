@@ -139,7 +139,9 @@ the diff in the run **Summary** — what an `apply` would change, with no infras
 
 Actions → **destroy** → *Run workflow*:
 - `mode = destroy` — tears down the live cluster (uninstalls Helm releases first so the app ELB is
-  released, then `terraform destroy`).
+  released, then `terraform destroy`). It polls until the load balancers in the VPC actually drain,
+  and if `terraform destroy` still fails on a `DependencyViolation` (an orphaned ELB/ENI pinning a
+  subnet), it force-deletes the leftover load balancers and freed ENIs and retries once.
 - `mode = purge-state` — use when the sandbox already expired the resources; clears the S3 state object
   (and any stale lockfile) so the next `apply` starts clean.
 
