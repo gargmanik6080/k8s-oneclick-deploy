@@ -27,7 +27,7 @@ Running the `apply` workflow performs, end to end:
 3. **Provision** a VPC + EKS cluster with Terraform (managed `m3.medium` node group).
 4. **Install** a trimmed `kube-prometheus-stack` (Prometheus, Grafana, node-exporter, kube-state-metrics).
 5. **Deploy** the app via its Helm chart (Deployment + LoadBalancer Service + ServiceMonitor + Grafana dashboard).
-6. **Report** the app's LoadBalancer URL and the Grafana port-forward command.
+6. **Report** the app's and Grafana's LoadBalancer URLs (and the Prometheus port-forward command).
 
 ## Architecture
 
@@ -101,22 +101,24 @@ Set these under **Settings → Secrets and variables → Actions**. In the O'Rei
 1. Set the secrets above.
 2. Actions → **apply** → *Run workflow*.
 3. When it finishes, the run **Summary** shows:
-   - `App URL: http://<elb-hostname>/`
-   - `Grafana: kubectl port-forward -n monitoring svc/kps-grafana 3000:80`
+   - `App URL: http://<app-elb-hostname>/`
+   - `Grafana (admin / admin): http://<grafana-elb-hostname>/`
 
 **Verify**
 
 ```bash
-curl http://<elb-hostname>/          # → Hello World
-curl http://<elb-hostname>/metrics   # → Prometheus metrics
+curl http://<app-elb-hostname>/          # → Hello World
+curl http://<app-elb-hostname>/metrics   # → Prometheus metrics
 
-# Grafana (admin / admin)
-aws eks update-kubeconfig --region <region> --name oneclick-eks
-kubectl port-forward -n monitoring svc/kps-grafana 3000:80
-# open http://localhost:3000
+# Grafana — open the LoadBalancer URL from the run Summary (admin / admin):
+#   http://<grafana-elb-hostname>/
 #  - "Hello World Service" dashboard: request rate, p95 latency, ready pods, status codes
 #  - built-in Kubernetes dashboards: node/pod/cluster health
-#  - Status → Targets: the hello-world ServiceMonitor should be UP
+
+# Prometheus stays ClusterIP (no public auth) — reach it via port-forward:
+aws eks update-kubeconfig --region <region> --name oneclick-eks
+kubectl port-forward -n monitoring svc/kps-kube-prometheus-stack-prometheus 9090:9090
+# open http://localhost:9090 → Status → Targets: the hello-world ServiceMonitor should be UP
 ```
 
 **Tear down**
