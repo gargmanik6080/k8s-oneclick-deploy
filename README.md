@@ -44,6 +44,8 @@ GitHub Actions (workflow_dispatch)
 │       ├─ helm: hello-world chart  (--set image.tag=<sha>)   │
 │       └─ state in S3: oneclick-tfstate-<account>-<region> ──┘
 │
+├── plan.yml ─── init S3 backend → fmt/validate → terraform plan (read-only preview)
+│
 └── destroy.yml
       ├─ destroy:     init S3 backend → helm uninstall (release ELB) → terraform destroy
       └─ purge-state: clear the S3 state object (sandbox already reaped resources)
@@ -71,7 +73,7 @@ terraform/             VPC + EKS via terraform-aws-modules (m3.medium, AZ-filter
 helm/hello-world/      App Helm chart: Deployment, LoadBalancer Service,
                        ServiceMonitor, Grafana dashboard ConfigMap
 monitoring/            Trimmed kube-prometheus-stack values
-.github/workflows/     apply.yml (deploy) + destroy.yml (teardown)
+.github/workflows/     apply.yml (deploy) + plan.yml (preview) + destroy.yml (teardown)
 ```
 
 ## Prerequisites
@@ -123,6 +125,12 @@ aws eks update-kubeconfig --region <region> --name oneclick-eks
 kubectl port-forward -n monitoring svc/kps-kube-prometheus-stack-prometheus 9090:9090
 # open http://localhost:9090 → Status → Targets: the hello-world ServiceMonitor should be UP
 ```
+
+**Preview (optional)**
+
+Actions → **plan** → *Run workflow* runs `terraform plan` (read-only) against the shared S3 state and prints
+the diff in the run **Summary** — what an `apply` would change, with no infrastructure touched. It also gates on
+`terraform fmt -check` + `validate`. Safe to run anytime; if no state exists yet it shows a full create.
 
 **Tear down**
 
