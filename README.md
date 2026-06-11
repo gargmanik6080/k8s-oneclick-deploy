@@ -42,11 +42,11 @@ GitHub Actions (workflow_dispatch)
 │       ├─ aws eks update-kubeconfig                          │
 │       ├─ helm: kube-prometheus-stack  (monitoring/values.yaml)
 │       ├─ helm: hello-world chart  (--set image.tag=<sha>)   │
-│       └─ upload terraform.tfstate artifact ────────────────┘
+│       └─ state in S3: oneclick-tfstate-<account>-<region> ──┘
 │
 └── destroy.yml
-      ├─ destroy:     restore state → helm uninstall (release ELB) → terraform destroy
-      └─ purge-state: delete the stale state artifact (sandbox already reaped resources)
+      ├─ destroy:     init S3 backend → helm uninstall (release ELB) → terraform destroy
+      └─ purge-state: clear the S3 state object (sandbox already reaped resources)
 
          ┌─────────────────────── EKS cluster ───────────────────────┐
          │  ns: hello-world           ns: monitoring                  │
@@ -129,8 +129,8 @@ kubectl port-forward -n monitoring svc/kps-kube-prometheus-stack-prometheus 9090
 Actions → **destroy** → *Run workflow*:
 - `mode = destroy` — tears down the live cluster (uninstalls Helm releases first so the app ELB is
   released, then `terraform destroy`).
-- `mode = purge-state` — use when the sandbox already expired the resources; deletes the stale
-  Terraform state artifact so the next `apply` starts clean.
+- `mode = purge-state` — use when the sandbox already expired the resources; clears the S3 state object
+  (and any stale lockfile) so the next `apply` starts clean.
 
 ## Design notes
 
@@ -143,8 +143,12 @@ Actions → **destroy** → *Run workflow*:
   another namespace; the Grafana sidecar watches **all** namespaces for dashboard ConfigMaps.
 - **Docker Hub instead of ECR.** The sandbox locks ECR to private repos with a fixed registry policy, so
   the image lives on Docker Hub and the workflow creates an in-cluster `dockerhub-pull` secret.
-- **Local state as an artifact.** No remote backend is assumed; `terraform.tfstate` is uploaded/downloaded
-  between runs as a workflow artifact.
+- **Remote state in S3 (same account).** Both workflows share one source of truth, so re-applies are
+  incremental and `destroy` always sees what `apply` created. The bucket
+  (`oneclick-tfstate-<account>-<region>`, versioned + private) is created out-of-band by the workflows —
+  it can't be managed by the very state it stores. State locking uses Terraform's native S3 lockfile
+  (`use_lockfile`, no DynamoDB). If the bucket is absent (e.g. a fresh sandbox account), `init` starts from
+  empty state — a clean build.
 
 ## Known limitations
 
@@ -152,8 +156,10 @@ Actions → **destroy** → *Run workflow*:
   creds expire mid-provision — re-run after refreshing.
 - **Not production sizing.** Tiny nodes mean trimmed monitoring (no Alertmanager, 3h retention, ephemeral
   Prometheus storage). Bump `desired_size` / `node_count` if pods stay `Pending`.
-- **Teardown ordering.** Run `destroy` before the sandbox reaps resources. If it already did, use
-  `purge-state` to clear the stale artifact.
+- **Teardown ordering.** Run `destroy` before the sandbox reaps resources. If it already did, `destroy`
+  refreshes against the empty account and clears state harmlessly; `purge-state` is the faster reset (drops
+  the S3 state object without spinning up Terraform). State persists across runs only while the sandbox
+  account does — a brand-new account starts from a fresh, empty bucket.
 - **Provisioning time.** EKS is the long pole (~12–15 min); a full run is ~20–25 min.
 - **Demo exposure.** The LoadBalancer and Grafana are exposed for convenience — no TLS, ingress, or
   hardened auth beyond defaults.
